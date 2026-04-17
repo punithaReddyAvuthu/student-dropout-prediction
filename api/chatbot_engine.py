@@ -1,13 +1,11 @@
 import nltk
 import spacy
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-from transformers import pipeline
-import torch
 import random
 import os
 
 # Initialize components
-print("Initializing Chatbot Engine...")
+print("Initializing Optimized Chatbot Engine...")
 try:
     # Ensure NLTK resources are available
     import nltk
@@ -27,24 +25,21 @@ except Exception as e:
     nlp = None
     sid = None
 
-# Global generator (lazy loaded)
-generator = None
+# Cloud Optimization: Removing Transformers for speed and stability
+# We use a diverse set of canned responses for general queries
 
-def load_generator():
-    """Lazy loads the transformer model only when needed."""
-    global generator
-    if generator is None:
-        try:
-            print("⏳ Loading Transformers pipeline (distilgpt2)... This may take a moment.")
-            # use device=-1 for CPU
-            generator = pipeline("text-generation", model="distilgpt2", device=-1)
-            print("✅ Transformers pipeline loaded.")
-        except Exception as e:
-            print(f"Chatbot Init Error (Transformers): {e}")
-            generator = "FAILED" # Mark as failed to avoid repeated attempts
-    return generator
+GENERAL_RESPONSES = [
+    "I'm your AI counselor, here to help you navigate your academic journey. Is there a specific subject or stress factor you'd like to discuss?",
+    "Hello! I'm here to support your success. Would you like to talk about study techniques, stress management, or perhaps your risk level?",
+    "I understand. Your well-being is as important as your grades. How can I assist you today?",
+    "That's interesting. Many students find that talking through their concerns is the first step toward improvement. Tell me more.",
+    "I'm listening. Whether it's about your CGPA, your sleep schedule, or just general anxiety, I'm here for you.",
+    "I'm specialized in helping students manage academic risk and stress. What's on your mind right now?"
+]
 
-# Predefined empathetic responses for high stress
+GREETINGS = ["hello", "hi", "hey", "greetings", "good morning", "good afternoon"]
+WHO_ARE_YOU = ["who are you", "what can you do", "help me", "your name", "purpose"]
+
 STRESS_RESPONSES = [
     "I understand that things feel overwhelming right now. Remember that you don't have to carry this alone. Would you like to break down your tasks into a small study plan?",
     "It's completely normal to feel stressed. You've handled difficult situations before, and you can handle this too. Let's focus on one step at a time.",
@@ -70,56 +65,34 @@ ACADEMIC_ADVICE = [
 ]
 
 def get_chatbot_response(user_query):
-    """
-    Analyzes the query for stress and intent, then generates a response.
-    """
-    # 1. Stress Detection (Sentiment) - Use a more sensitive threshold
+    query_clean = user_query.lower().strip()
+    
+    # Check for basic greetings
+    if any(greet in query_clean for greet in GREETINGS):
+        return random.choice(GENERAL_RESPONSES)
+
+    # Check for identity questions
+    if any(q in query_clean for q in WHO_ARE_YOU):
+        return "I am an AI-powered Student Counselor. I can predict your dropout risk and offer advice on managing stress and improving your grades."
+
+    # 1. Stress Detection (Sentiment)
     is_stressed = False
     if sid:
         sentiment = sid.polarity_scores(user_query)
-        # -0.05 is the standard threshold for "negative" in VADER
         is_stressed = sentiment['compound'] <= -0.1
     
-    # 2. Intent Detection (Keyword Substring matching is more robust)
-    query_clean = user_query.lower()
-    
+    # 2. Intent Detection
     intent = "general"
-    
-    # Academic keywords
     if any(k in query_clean for k in ["exam", "cgpa", "study", "studying", "plan", "marks", "backlog", "assignment"]):
         intent = "academic"
-    
-    # Stress keywords (Check specifically for stress words)
     if any(k in query_clean for k in ["stress", "anxi", "sad", "fail", "scared", "tired", "quit", "overwhelmed", "help"]):
         intent = "stress"
 
     # 3. Generate Response
     if intent == "stress" or is_stressed:
-        base_msg = random.choice(STRESS_RESPONSES)
+        return random.choice(STRESS_RESPONSES)
     elif intent == "academic":
-        base_msg = random.choice(ACADEMIC_ADVICE)
-    else:
-        # Use AI generation for general queries
-        gen = load_generator()
-        if gen and gen != "FAILED":
-            try:
-                # Prompt engineering to keep GPT-2 focused on student counseling
-                prompt = f"Student says: {user_query}\nCounselor advice:"
-                ai_out = gen(prompt, max_length=50, num_return_sequences=1, truncation=True)
-                # Clean up the response
-                raw_text = ai_out[0]['generated_text']
-                base_msg = raw_text.split("Counselor advice:")[-1].strip()
-                if not base_msg:
-                    base_msg = "I'm here to support you. Tell me more about what's on your mind."
-            except:
-                base_msg = "I understand. Let's talk more about how I can help you with your studies or well-being."
-        else:
-            base_msg = "I'm here to support you. How can I help with your academic journey today?"
-
-    return base_msg
-
-if __name__ == "__main__":
-    # Test cases
-    print(f"Test 1 (Stress): {get_chatbot_response('I feel very stressed about my exams')}")
-    print(f"Test 2 (Academic): {get_chatbot_response('How can I improve my CGPA?')}")
-    print(f"Test 3 (General): {get_chatbot_response('Hello bot')}")
+        return random.choice(ACADEMIC_ADVICE)
+    
+    # Fallback to general advice
+    return random.choice(GENERAL_RESPONSES)
