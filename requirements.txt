@@ -5,9 +5,11 @@ tqdm
 plotly>=5.18.0
 requests
 nltk
-spacy
+spacy>=3.7.0
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
 transformers
 torch
+torchvision
 scikit-learn>=1.2.0
 xgboost>=2.0.0
 lightgbm>=4.0.0
