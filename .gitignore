@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# Data and Models (Avoid pushing large binaries and personal data)
+api/database/*.db
+api/models/*.pkl
+*.pkl
+catboost_info/
+*.xlsx
+
+# Logs and results
+*.txt
+api_log.txt
+latest_results.txt
+
+# VS Code
+.vscode/
+
+# Local Environment Variables
+.env
