@@ -35,22 +35,34 @@ st.set_page_config(
 # --- AI Model Loading (Cached for performance) ---
 @st.cache_resource
 def load_ai_models():
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    model_dir = os.path.join(base_dir, 'api', 'models')
+    # Correctly locate the project root (one level up from /dashboard)
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(app_dir)
+    model_dir = os.path.join(project_root, 'api', 'models')
+    
+    model_file = os.path.join(model_dir, 'best_model_catboost.pkl')
     
     # Check if models exist
-    if not os.path.exists(os.path.join(model_dir, 'best_model_catboost.pkl')):
-        st.error(f"Model files not found in {model_dir}. Please ensure api/models/ contains the .pkl files.")
-        return None
+    if not os.path.exists(model_file):
+        # Fallback: check if we are already in root
+        model_dir = os.path.join(app_dir, 'api', 'models')
+        model_file = os.path.join(model_dir, 'best_model_catboost.pkl')
+        if not os.path.exists(model_file):
+            st.error(f"❌ AI Models not found at {model_file}. Please check folder structure.")
+            return None
 
-    artifacts = {
-        'model': joblib.load(os.path.join(model_dir, 'best_model_catboost.pkl')),
-        'le_target': joblib.load(os.path.join(model_dir, 'label_encoder.pkl')),
-        'X_background': joblib.load(os.path.join(model_dir, 'xai_background.pkl')),
-        'scaler': joblib.load(os.path.join(model_dir, 'scaler.pkl')),
-        'feature_encoders': joblib.load(os.path.join(model_dir, 'feature_encoders.pkl'))
-    }
-    return artifacts
+    try:
+        artifacts = {
+            'model': joblib.load(model_file),
+            'le_target': joblib.load(os.path.join(model_dir, 'label_encoder.pkl')),
+            'X_background': joblib.load(os.path.join(model_dir, 'xai_background.pkl')),
+            'scaler': joblib.load(os.path.join(model_dir, 'scaler.pkl')),
+            'feature_encoders': joblib.load(os.path.join(model_dir, 'feature_encoders.pkl'))
+        }
+        return artifacts
+    except Exception as e:
+        st.error(f"❌ Error loading model artifacts: {e}")
+        return None
 
 # Global feature lists
 NUMERIC_FEATURES = [
@@ -189,19 +201,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- Database Connection ---
-# Use a path relative to the script location for cloud compatibility
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api', 'database', 'predictions.db')
+# Correctly locate the database (one level up from /dashboard, then into /api/database)
+def get_db_path():
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(app_dir)
+    return os.path.join(project_root, 'api', 'database', 'predictions.db')
+
+DB_PATH = get_db_path()
 
 def load_data():
-    if not os.path.exists(DB_PATH):
-        # Try parent directory as fallback for cloud environments
-        alt_path = os.path.join(os.getcwd(), 'api', 'database', 'predictions.db')
-        if os.path.exists(alt_path):
-            current_db = alt_path
-        else:
+    current_db = get_db_path()
+    if not os.path.exists(current_db):
+        # Fallback to current working directory
+        current_db = os.path.join(os.getcwd(), 'api', 'database', 'predictions.db')
+        if not os.path.exists(current_db):
             return pd.DataFrame()
-    else:
-        current_db = DB_PATH
 
     try:
         conn = sqlite3.connect(current_db)
