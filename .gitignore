@@ -19,6 +19,7 @@ catboost_info/
 
 # Logs and results
 *.txt
+!requirements.txt
 api_log.txt
 latest_results.txt
 
