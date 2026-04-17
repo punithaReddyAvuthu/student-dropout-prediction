@@ -4,13 +4,158 @@ import sqlite3
 import plotly.express as px
 import os
 import time
+import joblib
+import numpy as np
+import shap
+import lime
+import lime.lime_tabular
+from datetime import datetime
+
+# Import local modules
+import sys
+# Add parent dir to path to find /api modules
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'api'))
+# We try to import, but if they are missing (e.g. in cloud without local files), we handle it
+try:
+    from database import log_prediction
+    from chatbot_engine import get_chatbot_response
+except ImportError:
+    # Fallback for cloud deployment where 'api' might be in root or processed differently
+    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api'))
+    from database import log_prediction
+    from chatbot_engine import get_chatbot_response
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Student Dropout Prediction Dashboard",
-    page_icon="Student",
+    page_title="AI Student Dropout Prediction",
+    page_icon="🎓",
     layout="wide"
 )
+
+# --- AI Model Loading (Cached for performance) ---
+@st.cache_resource
+def load_ai_models():
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    model_dir = os.path.join(base_dir, 'api', 'models')
+    
+    # Check if models exist
+    if not os.path.exists(os.path.join(model_dir, 'best_model_catboost.pkl')):
+        st.error(f"Model files not found in {model_dir}. Please ensure api/models/ contains the .pkl files.")
+        return None
+
+    artifacts = {
+        'model': joblib.load(os.path.join(model_dir, 'best_model_catboost.pkl')),
+        'le_target': joblib.load(os.path.join(model_dir, 'label_encoder.pkl')),
+        'X_background': joblib.load(os.path.join(model_dir, 'xai_background.pkl')),
+        'scaler': joblib.load(os.path.join(model_dir, 'scaler.pkl')),
+        'feature_encoders': joblib.load(os.path.join(model_dir, 'feature_encoders.pkl'))
+    }
+    return artifacts
+
+# Global feature lists
+NUMERIC_FEATURES = [
+    'age', 'year_of_study', 'attendance_percentage', 'cgpa', 'backlogs', 
+    'internal_marks_avg', 'assignment_submission_rate', 'class_participation_score', 
+    'login_frequency_lms', 'late_submission_count', 'disciplinary_warnings', 
+    'extracurricular_participation', 'self_confidence_score', 'stress_level', 
+    'motivation_level', 'sleep_hours', 'part_time_job', 'commute_time_minutes', 
+    'online_class_attendance', 'recorded_lecture_views', 'ai_tool_usage'
+]
+
+CATEGORICAL_FEATURES = [
+    'gender', 'department', 'family_income_range', 'parental_education', 
+    'library_usage', 'exam_anxiety', 'internet_access', 'doubt_forum_activity'
+]
+
+TRAINING_FEATURES = [
+    'gender', 'age', 'year_of_study', 'department', 'attendance_percentage', 
+    'cgpa', 'backlogs', 'internal_marks_avg', 'assignment_submission_rate', 
+    'class_participation_score', 'login_frequency_lms', 'late_submission_count', 
+    'disciplinary_warnings', 'extracurricular_participation', 'library_usage', 
+    'self_confidence_score', 'stress_level', 'motivation_level', 'exam_anxiety', 
+    'sleep_hours', 'family_income_range', 'parental_education', 'part_time_job', 
+    'commute_time_minutes', 'internet_access', 'online_class_attendance', 
+    'recorded_lecture_views', 'doubt_forum_activity', 'ai_tool_usage'
+]
+
+def preprocess_input(input_dict, artifacts):
+    df = pd.DataFrame([input_dict])
+    X = pd.DataFrame(index=[0], columns=TRAINING_FEATURES)
+    for col in TRAINING_FEATURES:
+        X[col] = df[col].iloc[0] if col in df.columns else np.nan
+        
+    for col in CATEGORICAL_FEATURES:
+        if pd.isna(X[col].iloc[0]): X[col] = 'Unknown'
+        val = str(X[col].iloc[0])
+        le = artifacts['feature_encoders'].get(col)
+        if le:
+            X[col] = le.transform([val])[0] if val in le.classes_ else le.transform([le.classes_[0]])[0]
+        else:
+            X[col] = 0
+
+    X[NUMERIC_FEATURES] = X[NUMERIC_FEATURES].fillna(0)
+    if artifacts['scaler']:
+        X[NUMERIC_FEATURES] = artifacts['scaler'].transform(X[NUMERIC_FEATURES].astype(float).values)
+    return X
+
+def get_recommendations(risk_level, shap_results):
+    if not shap_results: return "Stay focused and maintain your current routine."
+    strengths, risks = [], []
+    for result in shap_results:
+        parts = result.split(":")
+        if len(parts) < 2: continue
+        if "strengthens" in parts[1] or "helps reduce" in parts[1]: strengths.append(parts[0].strip())
+        else: risks.append(parts[0].strip())
+
+    if risk_level == "High":
+        return f"URGENT: Schedule counseling. Focus on {', '.join(risks)}. Immediate intervention recommended."
+    elif risk_level == "Medium":
+        return f"MODERATE: Focus on {', '.join(risks)}. Your strength in {strengths[0] if strengths else 'attendance'} helps."
+    return f"LOW RISK: Great job! Consistency in {', '.join(strengths[:2])} is key."
+
+def run_local_prediction(input_data):
+    try:
+        arts = load_ai_models()
+        if not arts: return None
+        X_processed = preprocess_input(input_data, arts)
+        risk_map = {0: "High", 1: "Low", 2: "Medium"}
+        
+        prediction = arts['model'].predict(X_processed)
+        pred_class = int(prediction[0])
+        risk_level = risk_map.get(pred_class, "Unknown")
+        
+        probs = arts['model'].predict_proba(X_processed)[0]
+        score = float(probs[pred_class])
+        
+        # SHAP
+        explainer = shap.TreeExplainer(arts['model'])
+        shap_values = explainer.shap_values(X_processed)
+        if isinstance(shap_values, list): row_shap = shap_values[pred_class][0]
+        elif len(shap_values.shape) == 3: row_shap = shap_values[0, :, pred_class]
+        else: row_shap = shap_values[0]
+        
+        top_idx = np.argsort(np.abs(row_shap))[-3:][::-1]
+        explanations = []
+        for idx in top_idx:
+            feat = list(X_processed.columns)[idx].replace('_', ' ').title()
+            explanations.append(f"{feat}: {'increases risk' if risk_level != 'Low' else 'strengthens stability'}")
+            
+        recommendations = get_recommendations(risk_level, explanations)
+        
+        # Log to DB
+        log_prediction(input_data, score, risk_level, " | ".join(explanations), "", recommendations)
+        
+        return {
+            "risk_level": risk_level,
+            "confidence_score": round(score, 4),
+            "why_this_risk": explanations,
+            "recommendations": recommendations
+        }
+    except Exception as e:
+        import traceback
+        st.error(f"Prediction Error: {e}")
+        st.code(traceback.format_exc())
+        return None
 
 # --- Custom CSS for Styling ---
 st.markdown("""
@@ -44,13 +189,22 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- Database Connection ---
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'api', 'database', 'predictions.db')
+# Use a path relative to the script location for cloud compatibility
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api', 'database', 'predictions.db')
 
 def load_data():
     if not os.path.exists(DB_PATH):
-        return pd.DataFrame()
+        # Try parent directory as fallback for cloud environments
+        alt_path = os.path.join(os.getcwd(), 'api', 'database', 'predictions.db')
+        if os.path.exists(alt_path):
+            current_db = alt_path
+        else:
+            return pd.DataFrame()
+    else:
+        current_db = DB_PATH
+
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(current_db)
         query = "SELECT * FROM predictions ORDER BY timestamp DESC"
         df = pd.read_sql_query(query, conn)
         conn.close()
@@ -67,26 +221,9 @@ def main():
 
     df = load_data()
 
-    # --- API Status Check ---
-    try:
-        import requests
-        resp = requests.get("http://localhost:5000/", timeout=5)
-        api_status = "Online" if resp.status_code == 200 else "Offline"
-    except:
-        api_status = "Offline"
-    
-    if api_status == "Online":
-        st.sidebar.success("Backend API: ONLINE")
-    else:
-        st.sidebar.error("Backend API: OFFLINE")
-        if st.sidebar.button("🔄 Start Backend Server"):
-            with st.spinner("Starting API..."):
-                import subprocess
-                import sys
-                import os
-                api_path = os.path.join(os.getcwd(), 'api', 'app.py')
-                subprocess.Popen([sys.executable, api_path], creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0)
-                st.rerun()
+    # --- System Status (Consolidated) ---
+    st.sidebar.success("🤖 AI System: Consolidated & Standalone")
+    st.sidebar.info("This application handles both prediction and analysis locally (no separate backend needed).")
 
     if df.empty:
         st.warning("No student data available in the database.")
@@ -261,20 +398,16 @@ def main():
                 "parental_education": parent_ed, "part_time_job": part_time, "commute_time_minutes": commute, 
                 "internet_access": internet, "online_class_attendance": online_att, "recorded_lecture_views": lec_views
             }
-            try:
-                import requests
-                response = requests.post("http://localhost:5000/predict", json=payload)
-                if response.status_code == 200:
-                    res = response.json()['prediction']
+            with st.spinner("🤖 AI Counselor is analyzing your data..."):
+                res = run_local_prediction(payload)
+                if res:
                     st.success(f"Risk Level: **{res['risk_level']}** (Confidence: {res['confidence_score']})")
                     st.info(res['recommendations'])
                     st.write("#### Contributing Factors:")
                     for f in res['why_this_risk']: st.write(f"- {f}")
                     st.balloons()
-            except Exception as e: 
-                st.error(f"📡 Connection Error: Could not reach the Backend API.")
-                st.info("💡 Try clicking the 'Start Backend Server' button in the sidebar or make sure 'python start_system.py' is running in your terminal.")
-                st.debug(f"Details: {e}")
+                else:
+                    st.error("Failed to generate prediction. Check system logs.")
 
     # --- Tab 4: AI Counseling Chat ---
     with tab4:
@@ -325,17 +458,13 @@ def main():
                 st.markdown(user_input)
             st.session_state.messages.append({"role": "user", "content": user_input})
 
-            # Get response from API
+            # Get response locally
             try:
                 # Use a small delay for "AI thinking" feel
                 with st.spinner("AI Counselor is thinking..."):
-                    resp = requests.post("http://localhost:5000/chat", json={"query": user_input}, timeout=30)
-                    if resp.status_code == 200:
-                        bot_res = resp.json().get("response", "I'm listening. Please continue.")
-                    else:
-                        bot_res = "I'm having a little trouble connecting right now, but I'm here for you. Is there anything else on your mind?"
-            except Exception:
-                bot_res = "Connection error. Please ensure the backend server is running."
+                    bot_res = get_chatbot_response(user_input)
+            except Exception as e:
+                bot_res = f"I'm having a little trouble thinking right now. Error: {e}"
 
             # Display assistant response with "Streaming" effect
             with st.chat_message("assistant", avatar="🎓"):

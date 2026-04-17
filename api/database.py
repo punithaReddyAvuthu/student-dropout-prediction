@@ -4,7 +4,10 @@ from datetime import datetime
 
 # Path to the database file
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(DB_DIR, 'database', 'predictions.db')
+# Ensure the database directory exists
+db_folder = os.path.join(DB_DIR, 'database')
+os.makedirs(db_folder, exist_ok=True)
+DB_FILE = os.path.join(db_folder, 'predictions.db')
 
 def get_db_connection():
     """Establish a connection to the SQLite database."""

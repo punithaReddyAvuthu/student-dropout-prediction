@@ -8,12 +8,14 @@ __pycache__/
 venv/
 env/
 
-# Data and Models (Avoid pushing large binaries and personal data)
+# Data (Avoid pushing large databases)
 api/database/*.db
-api/models/*.pkl
-*.pkl
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
 catboost_info/
-*.xlsx
 
 # Logs and results
 *.txt
