@@ -1,36 +1,50 @@
 import streamlit as st
-import pandas as pd
-import sqlite3
-import plotly.express as px
 import os
-import time
-import joblib
-import numpy as np
-import shap
-import lime
-import lime.lime_tabular
-from datetime import datetime
-
-# Import local modules
 import sys
-# Add parent dir to path to find /api modules
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'api'))
-# We try to import, but if they are missing (e.g. in cloud without local files), we handle it
-try:
-    from database import log_prediction
-    from chatbot_engine import get_chatbot_response
-except ImportError:
-    # Fallback for cloud deployment where 'api' might be in root or processed differently
-    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'api'))
-    from database import log_prediction
-    from chatbot_engine import get_chatbot_response
 
-# --- Page Configuration ---
-st.set_page_config(
-    page_title="AI Student Dropout Prediction",
-    page_icon="🎓",
-    layout="wide"
-)
+# --- TOP LEVEL CRASH PROTECTOR ---
+# This ensures that ANY error during startup is shown on the screen
+try:
+    import pandas as pd
+    import sqlite3
+    import plotly.express as px
+    import time
+    import joblib
+    import numpy as np
+    import shap
+    import lime
+    import lime.lime_tabular
+    from datetime import datetime
+
+    # Import local modules
+    # Add parent dir AND current dir to path
+    app_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(app_dir)
+    sys.path.append(project_root)
+    sys.path.append(os.path.join(project_root, 'api'))
+    
+    # We try to import, but if they are missing, we handle it
+    try:
+        from database import log_prediction
+        from chatbot_engine import get_chatbot_response
+    except ImportError as e:
+        st.error(f"⚠️ Import Error: Could not find API modules. Path searched: {sys.path}")
+        st.exception(e)
+        from api.database import log_prediction
+        from api.chatbot_engine import get_chatbot_response
+
+    # --- Page Configuration ---
+    st.set_page_config(
+        page_title="AI Student Dropout Prediction",
+        page_icon="🎓",
+        layout="wide"
+    )
+
+except Exception as e:
+    st.error("🚨 CRITICAL STARTUP ERROR")
+    st.write("The application failed to start. This is often due to a Python version mismatch or missing libraries.")
+    st.exception(e)
+    st.stop()
 
 # --- AI Model Loading (Cached for performance) ---
 @st.cache_resource
