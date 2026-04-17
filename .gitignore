@@ -8,8 +8,8 @@ __pycache__/
 venv/
 env/
 
-# Data (Avoid pushing large databases)
-api/database/*.db
+# Data
+!api/database/predictions.db
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
