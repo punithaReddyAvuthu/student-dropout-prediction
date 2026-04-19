@@ -276,7 +276,12 @@ def predict():
                     val = row_shap[idx]
                     
                     # Logic for "Good/Bad" categorization
-                    is_good = (val < 0) # Negative SHAP value reduces dropout risk
+                    # If target class is Low Risk, pushing towards it (positive) is good.
+                    # If target class is High/Medium Risk, pushing towards it (positive) is bad.
+                    if risk_level == "Low":
+                        is_good = (val > 0)
+                    else:
+                        is_good = (val < 0)
                     
                     status = "Good" if is_good else "Danger"
                     if abs(val) < 0.05: status = "Warning" # Subtle impact
