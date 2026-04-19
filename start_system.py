@@ -6,7 +6,7 @@ import requests
 import signal
 
 def start_backend():
-    print("🚀 Starting Backend API (Flask)...")
+    print("--- Starting Backend API (Flask) ---")
     api_path = os.path.join(os.path.dirname(__file__), 'api', 'app.py')
     
     # Open log file to capture output without blocking (deadlocking) the process
@@ -22,13 +22,13 @@ def start_backend():
     return process
 
 def wait_for_api(timeout=600):
-    print("⏳ Waiting for API to be ready...")
+    print("... Waiting for API to be ready ...")
     start_time = time.time()
     while time.time() - start_time < timeout:
         try:
             response = requests.get("http://localhost:5000/", timeout=10)
             if response.status_code == 200:
-                print("✅ Backend API is ONLINE!")
+                print("[SUCCESS] Backend API is ONLINE!")
                 return True
         except requests.exceptions.ConnectionError:
             pass
@@ -36,12 +36,12 @@ def wait_for_api(timeout=600):
     return False
 
 def start_dashboard():
-    print("🎨 Starting Streamlit Dashboard...")
+    print("--- Starting Streamlit Dashboard ---")
     dash_path = os.path.join(os.path.dirname(__file__), 'dashboard', 'app.py')
     try:
         subprocess.run(["streamlit", "run", dash_path])
     except KeyboardInterrupt:
-        print("\n👋 Shutting down...")
+        print("\nShutting down...")
 
 def main():
     api_process = None
@@ -62,14 +62,14 @@ def main():
     finally:
         # 4. Cleanup
         if api_process:
-            print("🧹 Cleaning up background processes...")
+            print("Cleaning up background processes...")
             if os.name == 'nt':
                 # On Windows, need taskkill to ensure sub-processes like watchdog are killed
                 subprocess.run(['taskkill', '/F', '/T', '/PID', str(api_process.pid)], 
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             else:
                 api_process.terminate()
-            print("✨ All systems shut down.")
+            print("All systems shut down successfully.")
 
 if __name__ == "__main__":
     main()

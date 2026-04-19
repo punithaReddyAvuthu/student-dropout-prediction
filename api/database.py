@@ -1,6 +1,7 @@
 import sqlite3
 import os
 from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # Path to the database file
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -72,6 +73,17 @@ def init_db():
         )
     ''')
     
+    # Create the users table for authentication
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            email TEXT,
+            password_hash TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    
     conn.commit()
     conn.close()
     print(f"Database initialized at {DB_FILE}")
@@ -120,6 +132,51 @@ def log_prediction(input_data, probability, risk_level, xai_shap=None, xai_lime=
     except Exception as e:
         print(f"Error logging to database: {str(e)}")
         return False
+
+# --- User Authentication Functions ---
+
+def add_user(username, password, email=None):
+    """Create a new user with a hashed password."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        password_hash = generate_password_hash(password)
+        cursor.execute('INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)', (username, password_hash, email))
+        conn.commit()
+        conn.close()
+        return True, "User registered successfully."
+    except sqlite3.IntegrityError:
+        return False, "Username already exists."
+    except Exception as e:
+        return False, f"Error creating user: {str(e)}"
+
+def verify_user(username, password):
+    """Verify user credentials."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT password_hash FROM users WHERE username = ?', (username,))
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result and check_password_hash(result['password_hash'], password):
+            return True, "Authentication successful."
+        return False, "Invalid username or password."
+    except Exception as e:
+        return False, f"Authentication error: {str(e)}"
+
+def get_user(username):
+    """Get user details (excluding password hash)."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT id, username, created_at FROM users WHERE username = ?', (username,))
+        user = cursor.fetchone()
+        conn.close()
+        return dict(user) if user else None
+    except Exception as e:
+        print(f"Error fetching user: {e}")
+        return None
 
 # Initialize the DB when this file is imported or run
 if __name__ == '__main__':

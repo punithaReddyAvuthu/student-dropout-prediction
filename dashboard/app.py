@@ -1,37 +1,23 @@
 import streamlit as st
 import os
-import sys
+import time
+import requests
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import sqlite3
+import base64
+from datetime import datetime
 
 # --- TOP LEVEL CRASH PROTECTOR ---
-# This ensures that ANY error during startup is shown on the screen
 try:
-    import pandas as pd
-    import sqlite3
-    import plotly.express as px
-    import time
-    import joblib
-    import numpy as np
-    import shap
-    import lime
-    import lime.lime_tabular
-    from datetime import datetime
-
-    # Import local modules
-    # Add parent dir AND current dir to path
-    app_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(app_dir)
-    sys.path.append(project_root)
-    sys.path.append(os.path.join(project_root, 'api'))
-    
-    # We try to import, but if they are missing, we handle it
+    # --- API Configuration ---
+    # In production, set this in Streamlit Secrets (Secrets manager)
     try:
-        from database import log_prediction
-        from chatbot_engine import get_chatbot_response
-    except ImportError as e:
-        st.error(f"⚠️ Import Error: Could not find API modules. Path searched: {sys.path}")
-        st.exception(e)
-        from api.database import log_prediction
-        from api.chatbot_engine import get_chatbot_response
+        BACKEND_URL = st.secrets["BACKEND_URL"]
+    except Exception:
+        # Fallback for local development when secrets.toml doesn't exist
+        BACKEND_URL = "http://localhost:5000"
 
     # --- Page Configuration ---
     st.set_page_config(
@@ -42,207 +28,274 @@ try:
 
 except Exception as e:
     st.error("🚨 CRITICAL STARTUP ERROR")
-    st.write("The application failed to start. This is often due to a Python version mismatch or missing libraries.")
+    st.write("The application failed to start. Please check your internet connection or backend URL.")
     st.exception(e)
     st.stop()
 
 # --- AI Model Loading (Cached for performance) ---
-@st.cache_resource
-def load_ai_models():
-    # Correctly locate the project root (one level up from /dashboard)
-    app_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(app_dir)
-    model_dir = os.path.join(project_root, 'api', 'models')
-    
-    model_file = os.path.join(model_dir, 'best_model_catboost.pkl')
-    
-    # Check if models exist
-    if not os.path.exists(model_file):
-        # Fallback: check if we are already in root
-        model_dir = os.path.join(app_dir, 'api', 'models')
-        model_file = os.path.join(model_dir, 'best_model_catboost.pkl')
-        if not os.path.exists(model_file):
-            st.error(f"❌ AI Models not found at {model_file}. Please check folder structure.")
-            return None
-
+def verify_user(username, password):
+    """Call the Flask API to verify user credentials."""
     try:
-        artifacts = {
-            'model': joblib.load(model_file),
-            'le_target': joblib.load(os.path.join(model_dir, 'label_encoder.pkl')),
-            'X_background': joblib.load(os.path.join(model_dir, 'xai_background.pkl')),
-            'scaler': joblib.load(os.path.join(model_dir, 'scaler.pkl')),
-            'feature_encoders': joblib.load(os.path.join(model_dir, 'feature_encoders.pkl'))
-        }
-        return artifacts
+        response = requests.post(f"{BACKEND_URL}/api/login", json={"username": username, "password": password})
+        if response.status_code == 200:
+            return True, "Login successful"
+        return False, response.json().get("error", "Invalid credentials")
     except Exception as e:
-        st.error(f"❌ Error loading model artifacts: {e}")
+        return False, f"Connection Error: {e}"
+
+def add_user(username, password, email=None):
+    """Call the Flask API to register a new user."""
+    try:
+        payload = {"username": username, "password": password, "email": email}
+        response = requests.post(f"{BACKEND_URL}/api/register", json=payload)
+        if response.status_code == 201:
+            return True, "Registration successful"
+        return False, response.json().get("error", "Registration failed")
+    except Exception as e:
+        return False, f"Connection Error: {e}"
+
+def get_chatbot_response(query, risk_level="Low", username="Student"):
+    """Call the Flask API for chatbot guidance with context."""
+    try:
+        payload = {"query": query, "risk_level": risk_level, "username": username}
+        response = requests.post(f"{BACKEND_URL}/chat", json=payload)
+        if response.status_code == 200:
+            return response.json().get("response", "No response from AI.")
+        return f"Error: {response.text}"
+    except Exception as e:
+        return f"Connection Error: {e}"
+
+def run_api_prediction(input_data):
+    """Call the Flask API for model prediction and XAI."""
+    try:
+        response = requests.post(f"{BACKEND_URL}/predict", json=input_data)
+        if response.status_code == 200:
+            # The API returns the "prediction" object directly
+            return response.json().get("prediction")
+        st.error(f"API Error: {response.text}")
         return None
-
-# Global feature lists
-NUMERIC_FEATURES = [
-    'age', 'year_of_study', 'attendance_percentage', 'cgpa', 'backlogs', 
-    'internal_marks_avg', 'assignment_submission_rate', 'class_participation_score', 
-    'login_frequency_lms', 'late_submission_count', 'disciplinary_warnings', 
-    'extracurricular_participation', 'self_confidence_score', 'stress_level', 
-    'motivation_level', 'sleep_hours', 'part_time_job', 'commute_time_minutes', 
-    'online_class_attendance', 'recorded_lecture_views', 'ai_tool_usage'
-]
-
-CATEGORICAL_FEATURES = [
-    'gender', 'department', 'family_income_range', 'parental_education', 
-    'library_usage', 'exam_anxiety', 'internet_access', 'doubt_forum_activity'
-]
-
-TRAINING_FEATURES = [
-    'gender', 'age', 'year_of_study', 'department', 'attendance_percentage', 
-    'cgpa', 'backlogs', 'internal_marks_avg', 'assignment_submission_rate', 
-    'class_participation_score', 'login_frequency_lms', 'late_submission_count', 
-    'disciplinary_warnings', 'extracurricular_participation', 'library_usage', 
-    'self_confidence_score', 'stress_level', 'motivation_level', 'exam_anxiety', 
-    'sleep_hours', 'family_income_range', 'parental_education', 'part_time_job', 
-    'commute_time_minutes', 'internet_access', 'online_class_attendance', 
-    'recorded_lecture_views', 'doubt_forum_activity', 'ai_tool_usage'
-]
-
-def preprocess_input(input_dict, artifacts):
-    df = pd.DataFrame([input_dict])
-    X = pd.DataFrame(index=[0], columns=TRAINING_FEATURES)
-    for col in TRAINING_FEATURES:
-        X[col] = df[col].iloc[0] if col in df.columns else np.nan
-        
-    for col in CATEGORICAL_FEATURES:
-        if pd.isna(X[col].iloc[0]): X[col] = 'Unknown'
-        val = str(X[col].iloc[0])
-        le = artifacts['feature_encoders'].get(col)
-        if le:
-            X[col] = le.transform([val])[0] if val in le.classes_ else le.transform([le.classes_[0]])[0]
-        else:
-            X[col] = 0
-
-    X[NUMERIC_FEATURES] = X[NUMERIC_FEATURES].fillna(0)
-    if artifacts['scaler']:
-        X[NUMERIC_FEATURES] = artifacts['scaler'].transform(X[NUMERIC_FEATURES].astype(float).values)
-    return X
-
-def get_recommendations(risk_level, shap_results):
-    if not shap_results: return "Stay focused and maintain your current routine."
-    strengths, risks = [], []
-    for result in shap_results:
-        parts = result.split(":")
-        if len(parts) < 2: continue
-        if "strengthens" in parts[1] or "helps reduce" in parts[1]: strengths.append(parts[0].strip())
-        else: risks.append(parts[0].strip())
-
-    if risk_level == "High":
-        return f"URGENT: Schedule counseling. Focus on {', '.join(risks)}. Immediate intervention recommended."
-    elif risk_level == "Medium":
-        return f"MODERATE: Focus on {', '.join(risks)}. Your strength in {strengths[0] if strengths else 'attendance'} helps."
-    return f"LOW RISK: Great job! Consistency in {', '.join(strengths[:2])} is key."
-
-def run_local_prediction(input_data):
-    try:
-        arts = load_ai_models()
-        if not arts: return None
-        X_processed = preprocess_input(input_data, arts)
-        risk_map = {0: "High", 1: "Low", 2: "Medium"}
-        
-        prediction = arts['model'].predict(X_processed)
-        pred_class = int(prediction[0])
-        risk_level = risk_map.get(pred_class, "Unknown")
-        
-        probs = arts['model'].predict_proba(X_processed)[0]
-        score = float(probs[pred_class])
-        
-        # SHAP
-        explainer = shap.TreeExplainer(arts['model'])
-        shap_values = explainer.shap_values(X_processed)
-        if isinstance(shap_values, list): row_shap = shap_values[pred_class][0]
-        elif len(shap_values.shape) == 3: row_shap = shap_values[0, :, pred_class]
-        else: row_shap = shap_values[0]
-        
-        top_idx = np.argsort(np.abs(row_shap))[-3:][::-1]
-        explanations = []
-        for idx in top_idx:
-            feat = list(X_processed.columns)[idx].replace('_', ' ').title()
-            explanations.append(f"{feat}: {'increases risk' if risk_level != 'Low' else 'strengthens stability'}")
-            
-        recommendations = get_recommendations(risk_level, explanations)
-        
-        # Log to DB
-        log_prediction(input_data, score, risk_level, " | ".join(explanations), "", recommendations)
-        
-        return {
-            "risk_level": risk_level,
-            "confidence_score": round(score, 4),
-            "why_this_risk": explanations,
-            "recommendations": recommendations
-        }
     except Exception as e:
-        import traceback
-        st.error(f"Prediction Error: {e}")
-        st.code(traceback.format_exc())
+        st.error(f"Network Error: {e}")
         return None
 
 # --- Custom CSS for Styling ---
 st.markdown("""
 <style>
-    .main {
-        background-color: #f8f9fa;
+    /* Auth Page Background (Dark Mode) */
+    .stApp:has(.auth-page-marker) {
+        background: radial-gradient(circle at top right, #111827 0%, #000000 100%) !important;
+        background-attachment: fixed !important;
     }
-    .kpi-card {
-        background-color: white;
-        border-radius: 10px;
-        padding: 20px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+
+    /* Dark Glassmorphism Card */
+    .glass-card {
+        background: rgba(255, 255, 255, 0.03);
+        backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        border-radius: 20px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 40px;
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+        color: #ffffff;
+        margin-top: 20px;
+    }
+
+    .auth-header {
         text-align: center;
-        border-bottom: 5px solid #ececec;
+        margin-bottom: 25px;
     }
-    .kpi-total { border-bottom-color: #3b82f6; }
-    .kpi-high { border-bottom-color: #ef4444; }
-    .kpi-low { border-bottom-color: #10b981; }
-    
-    .kpi-label {
-        font-size: 0.9rem;
-        color: #6c757d;
-        font-weight: 600;
+
+    .auth-header h1 {
+        color: #ffffff !important;
+        font-weight: 800 !important;
+        font-size: 2.2rem !important;
+        margin-bottom: 5px !important;
+        letter-spacing: -0.5px;
+    }
+
+    .auth-header p {
+        color: rgba(255, 255, 255, 0.6) !important;
+        font-size: 1rem !important;
+    }
+
+    /* Customizing Streamlit Widgets in Auth (Dark Mode) */
+    .stApp:has(.auth-page-marker) label {
+        color: #e2e8f0 !important;
+        font-weight: 500 !important;
+    }
+
+    .stApp:has(.auth-page-marker) .stTextInput input {
+        background-color: rgba(255, 255, 255, 0.05) !important;
+        border: 1px solid rgba(255, 255, 255, 0.1) !important;
+        border-radius: 10px !important;
+        padding: 12px !important;
+        color: #ffffff !important;
+    }
+
+    .stApp:has(.auth-page-marker) .stTextInput input::placeholder {
+        color: rgba(255, 255, 255, 0.3) !important;
+    }
+
+    .stApp:has(.auth-page-marker) .stButton>button {
+        width: 100% !important;
+        background: linear-gradient(90deg, #3b82f6 0%, #2563eb 100%) !important;
+        color: white !important;
+        border: none !important;
+        padding: 14px !important;
+        font-size: 1.1rem !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
         text-transform: uppercase;
+        letter-spacing: 1px;
+        height: auto !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
     }
-    .kpi-value {
-        font-size: 2rem;
-        font-weight: 700;
+
+    .stApp:has(.auth-page-marker) .stButton>button:hover {
+        background: linear-gradient(90deg, #2563eb 0%, #1d4ed8 100%) !important;
+        transform: translateY(-2px);
+        box-shadow: 0 10px 20px rgba(37, 99, 235, 0.4) !important;
+    }
+
+    /* Hide the default radio bubble styling */
+    .stApp:has(.auth-page-marker) [data-testid="stRadio"] div[role="radiogroup"] {
+        background: rgba(255,255,255,0.05);
+        padding: 8px;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.1);
+    }
+
+    .stApp:has(.auth-page-marker) [data-testid="stRadio"] label {
+        color: white !important;
+    }
+
+    .auth-footer {
+        text-align: center;
+        margin-top: 30px;
+        font-size: 0.9rem;
+        color: rgba(255, 255, 255, 0.4);
     }
 </style>
 """, unsafe_allow_html=True)
 
-# --- Database Connection ---
-# Correctly locate the database (one level up from /dashboard, then into /api/database)
-def get_db_path():
-    app_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(app_dir)
-    return os.path.join(project_root, 'api', 'database', 'predictions.db')
-
-DB_PATH = get_db_path()
-
+# --- Data Loading (via API) ---
 def load_data():
-    current_db = get_db_path()
-    if not os.path.exists(current_db):
-        # Fallback to current working directory
-        current_db = os.path.join(os.getcwd(), 'api', 'database', 'predictions.db')
-        if not os.path.exists(current_db):
-            return pd.DataFrame()
-
+    """Fetch prediction records from the Flask API instead of local SQLite."""
     try:
-        conn = sqlite3.connect(current_db)
-        query = "SELECT * FROM predictions ORDER BY timestamp DESC"
-        df = pd.read_sql_query(query, conn)
-        conn.close()
-        return df
-    except Exception as e:
-        st.error(f"Error loading data: {e}")
+        response = requests.get(f"{BACKEND_URL}/api/data")
+        if response.status_code == 200:
+            data = response.json().get("data", [])
+            # Convert back to DataFrame for the dashboard charts
+            return pd.DataFrame(data)
         return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error fetching historical data: {e}")
+        return pd.DataFrame()
+
+# --- Authentication UI ---
+def login_signup_ui():
+    # Hidden marker to trigger specific CSS
+    st.markdown("<div class='auth-page-marker'></div>", unsafe_allow_html=True)
+    
+    # Outer spacing
+    st.markdown("<br><br>", unsafe_allow_html=True)
+    
+    # Main Split-Screen Container
+    col_img, col_form = st.columns([1.2, 1], gap="large")
+    
+    with col_img:
+        st.markdown("<br>", unsafe_allow_html=True)
+        img_path = os.path.join(os.path.dirname(__file__), "assets", "login_illustration.png")
+        if os.path.exists(img_path):
+            st.image(img_path, use_container_width=True)
+        else:
+            st.markdown("<h1 style='color: #ffffff; font-size: 4rem; text-align: center;'>🎓</h1>", unsafe_allow_html=True)
+            st.markdown("<h2 style='color: #ffffff; text-align: center;'>AI Student Portal</h2>", unsafe_allow_html=True)
+            st.markdown("<p style='color: rgba(255,255,255,0.6); text-align: center;'>Predictive Analytics Dashboard</p>", unsafe_allow_html=True)
+
+    with col_form:
+        # Toggle at the very top (Updated colors for dark mode)
+        auth_mode = st.radio(
+            "Account Mode", ["Sign In", "Create Account"], 
+            horizontal=True,
+            label_visibility="collapsed"
+        )
+        
+        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
+        
+        if auth_mode == "Sign In":
+            st.markdown("""
+                <div class='auth-header'>
+                    <h1>Login</h1>
+                    <p>Enter your details to access the portal</p>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            username = st.text_input("Username", key="login_user", placeholder="Enter your username")
+            password = st.text_input("Password", type="password", key="login_pass", placeholder="Enter your password")
+            
+            # Stylistic extras
+            c1, c2 = st.columns([1,1])
+            with c1: st.checkbox("Remember me", value=True)
+            with c2: st.markdown("<p style='text-align: right; margin-top: 5px;'><a href='#' style='color: #3b82f6; text-decoration: none; font-size: 0.8rem; font-weight: 600;'>Forgot Password?</a></p>", unsafe_allow_html=True)
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("Sign In →", key="btn_login"):
+                if username and password:
+                    success, message = verify_user(username, password)
+                    if success:
+                        st.session_state.authenticated = True
+                        st.session_state.username = username
+                        st.success("Identity Verified. Entering Portal...")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {message}")
+                else:
+                    st.warning("Please provide valid credentials.")
+        
+        else:
+            st.markdown("""
+                <div class='auth-header'>
+                    <h1>Registration</h1>
+                    <p>Create a new student account</p>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            new_user = st.text_input("Username", key="signup_user", placeholder="Choose unique username")
+            new_email = st.text_input("Email", key="signup_email", placeholder="Enter your email address")
+            new_pass = st.text_input("Password", type="password", key="signup_pass", placeholder="Create strong password")
+            confirm_pass = st.text_input("Confirm Password", type="password", key="signup_confirm", placeholder="Repeat password")
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            if st.button("Complete Registration", key="btn_signup"):
+                if new_user and new_pass and new_email:
+                    if new_pass == confirm_pass:
+                        success, message = add_user(new_user, new_pass, new_email)
+                        if success:
+                            st.success(f"✅ {message}")
+                            st.info("Please sign in to proceed.")
+                        else:
+                            st.error(f"❌ {message}")
+                    else:
+                        st.error("Passwords do not match.")
+                else:
+                    st.warning("Please fill out all registration fields.")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<div class='auth-footer'>© 2024 University Academic Network</div>", unsafe_allow_html=True)
 
 # --- Main Dashboard ---
 def main():
+    # Sidebar Logout and User Info
+    st.sidebar.markdown(f"### Welcome, **{st.session_state.username}**! 👋")
+    if st.sidebar.button("🚪 Logout", use_container_width=True):
+        st.session_state.authenticated = False
+        st.session_state.username = None
+        st.rerun()
+    
+    st.sidebar.markdown("---")
+    
     st.markdown("<h1 style='text-align: center;'>Student Dropout Prediction Dashboard</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: #6c757d;'>Monitor student risk levels with simple data insights.</p>", unsafe_allow_html=True)
     st.markdown("---")
@@ -427,12 +480,51 @@ def main():
                 "internet_access": internet, "online_class_attendance": online_att, "recorded_lecture_views": lec_views
             }
             with st.spinner("🤖 AI Counselor is analyzing your data..."):
-                res = run_local_prediction(payload)
+                res = run_api_prediction(payload)
                 if res:
-                    st.success(f"Risk Level: **{res['risk_level']}** (Confidence: {res['confidence_score']})")
-                    st.info(res['recommendations'])
-                    st.write("#### Contributing Factors:")
-                    for f in res['why_this_risk']: st.write(f"- {f}")
+                    pred = res # The helper already extracted the 'prediction' key
+                    risk = pred['risk_level']
+                    conf = pred['confidence_score']
+                    recs = pred['recommendations']
+                    factors = pred['why_this_risk']
+
+                    # --- 1. Executive Summary Banner ---
+                    st.markdown("---")
+                    col_metric1, col_metric2 = st.columns([1, 1])
+                    with col_metric1:
+                        st.metric("Risk Assessment", risk, delta=f"{conf*100:.1f}% Confidence", delta_color="inverse" if risk == "High" else "normal")
+                    with col_metric2:
+                        st.info(f"**Status Summary:** {recs['summary']}")
+
+                    # --- 2. Deep Insights (Good/Bad/Warning) ---
+                    st.markdown("### 🔍 Student DNA Insights")
+                    cols = st.columns(len(factors) if factors else 1)
+                    for i, factor in enumerate(factors):
+                        with cols[i % len(cols)]:
+                            status_emoji = "✅" if factor['status'] == "Good" else "⚠️" if factor['status'] == "Warning" else "🚩"
+                            bgcolor = "rgba(16, 185, 129, 0.1)" if factor['status'] == "Good" else "rgba(245, 158, 11, 0.1)" if factor['status'] == "Warning" else "rgba(239, 68, 68, 0.1)"
+                            bordercolor = "#10b981" if factor['status'] == "Good" else "#f59e0b" if factor['status'] == "Warning" else "#ef4444"
+                            
+                            st.markdown(f"""
+                                <div style="background: {bgcolor}; border: 1px solid {bordercolor}; border-radius: 10px; padding: 15px; height: 160px;">
+                                    <h4 style="margin:0; font-size: 0.9rem;">{status_emoji} {factor['label']}</h4>
+                                    <p style="font-weight: bold; margin: 5px 0;">{factor['feature']}</p>
+                                    <p style="font-size: 0.8rem; opacity: 0.8;">{factor['advice']}</p>
+                                </div>
+                            """, unsafe_allow_html=True)
+
+                    # --- 3. Expert Action Plans ---
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    tab_t, tab_c, tab_check = st.tabs(["🍎 Teacher's Strategy", "🧠 Counselor's Advice", "✅ My Growth Checklist"])
+                    with tab_t:
+                        st.markdown(f"**Instructional Priorities:** {recs['teacher']}")
+                    with tab_c:
+                        st.markdown(f"**Well-being Focus:** {recs['counselor']}")
+                    with tab_check:
+                        st.write("Mark these off as you improve:")
+                        for item in recs['checklist']:
+                            st.checkbox(item)
+
                     st.balloons()
                 else:
                     st.error("Failed to generate prediction. Check system logs.")
@@ -447,13 +539,13 @@ def main():
         q1, q2, q3, q4 = st.columns(4)
         quick_query = None
         with q1:
-            if st.button("🧘 I'm stressed"): quick_query = "I'm feeling very stressed about my studies right now."
+            if st.button("🧘 I'm stressed", use_container_width=True): quick_query = "I'm feeling very overwhelmed and stressed about my studies right now."
         with q2:
-            if st.button("📚 Improve CGPA"): quick_query = "How can I improve my CGPA and academic performance?"
+            if st.button("📚 Improve CGPA", use_container_width=True): quick_query = "My marks are low, how can I improve my bad CGPA and academic performance?"
         with q3:
-            if st.button("⏰ Time Management"): quick_query = "I'm struggling with managing my time effectively."
+            if st.button("⏰ Time Management", use_container_width=True): quick_query = "I'm struggling with managing my time and late submissions."
         with q4:
-            if st.button("🚩 My Risk Factors"): quick_query = "What are my main risk factors for academic struggle?"
+            if st.button("🚩 Low Attendance", use_container_width=True): quick_query = "I have missed many classes and have low attendance issues."
 
         st.write("---")
 
@@ -486,11 +578,19 @@ def main():
                 st.markdown(user_input)
             st.session_state.messages.append({"role": "user", "content": user_input})
 
-            # Get response locally
+            # Get response with context
             try:
-                # Use a small delay for "AI thinking" feel
+                # Latest risk in the system for context
+                current_risk = "Low"
+                if not df.empty:
+                    current_risk = df.iloc[0]['predicted_risk_level']
+                
                 with st.spinner("AI Counselor is thinking..."):
-                    bot_res = get_chatbot_response(user_input)
+                    bot_res = get_chatbot_response(
+                        user_input, 
+                        risk_level=current_risk, 
+                        username=st.session_state.username
+                    )
             except Exception as e:
                 bot_res = f"I'm having a little trouble thinking right now. Error: {e}"
 
@@ -516,4 +616,12 @@ def main():
         st.rerun()
 
 if __name__ == "__main__":
-    main()
+    if "authenticated" not in st.session_state:
+        st.session_state.authenticated = False
+    if "username" not in st.session_state:
+        st.session_state.username = None
+        
+    if not st.session_state.authenticated:
+        login_signup_ui()
+    else:
+        main()

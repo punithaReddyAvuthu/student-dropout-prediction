@@ -3,6 +3,9 @@ import joblib
 import pandas as pd
 import numpy as np
 import os
+import sqlite3
+import random
+from flask_cors import CORS
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
 import traceback
@@ -10,11 +13,12 @@ import shap
 import lime
 import lime.lime_tabular
 
-# Import our database script to log predictions
-from database import log_prediction
+# Import our database script to log predictions and manage users
+from database import log_prediction, add_user, verify_user, get_db_connection
 from chatbot_engine import get_chatbot_response
 
 app = Flask(__name__)
+CORS(app) # Enable CORS for all routes to allow the Streamlit dashboard to connect
 
 # --- 1. Load the Model, Encoder, and XAI Background ---
 MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models')
@@ -65,12 +69,12 @@ def get_shap_explainer():
     global shap_explainer
     if shap_explainer is None and model is not None:
         try:
-            print("⏳ Initializing SHAP TreeExplainer (optimized for Trees)...")
+            print("... Initializing SHAP TreeExplainer (optimized for Trees) ...")
             # For tree-based models like CatBoost/XGBoost, 
             # we don't strictly need background data for TreeExplainer, 
             # and it's much faster/stabler without it.
             shap_explainer = shap.TreeExplainer(model)
-            print("✅ SHAP initialized.")
+            print("[SUCCESS] SHAP initialized.")
         except Exception as e:
             print(f"SHAP Init Error: {e}")
     return shap_explainer
@@ -80,14 +84,14 @@ def get_lime_explainer():
     global lime_explainer
     if lime_explainer is None and X_background is not None and le_target is not None: # Added le_target check
         try:
-            print("⏳ Initializing LIME TabularExplainer...")
+            print("... Initializing LIME TabularExplainer ...")
             lime_explainer = lime.lime_tabular.LimeTabularExplainer(
                 training_data=X_background.values,
                 feature_names=X_background.columns.tolist(),
                 class_names=le_target.classes_.tolist(),
                 mode='classification'
             )
-            print("✅ LIME initialized.")
+            print("[SUCCESS] LIME initialized.")
         except Exception as e:
             print(f"LIME Init Error: {e}")
     return lime_explainer
@@ -123,50 +127,51 @@ TRAINING_FEATURES = [
 
 def get_recommendations(risk_level, shap_results):
     """
-    Generate comprehensive personalized recommendations based on risk level and multiple SHAP factors.
+    Generate high-impact, professional recommendations categorized by persona.
     """
     if not shap_results:
-        return "Stay focused and maintain your current academic routine."
+        return {
+            "teacher": "Maintain current curriculum engagement. Monitor next internal assessment.",
+            "counselor": "Student appears stable. Routine check-in recommended in 30 days.",
+            "summary": "Excellent stability observed across all parameters."
+        }
 
     strengths = []
     risks = []
     
-    # Parse SHAP results (e.g., "Cgpa: strengthens academic stability")
     for result in shap_results:
-        part = result.split(":")
-        if len(part) < 2: continue
-        feature = part[0].strip()
-        wording = part[1].strip()
-        
-        if "strengthens" in wording or "helps reduce" in wording:
-            strengths.append(feature)
+        if isinstance(result, dict):
+            feature = result['feature']
+            if result['status'] == 'Good': strengths.append(feature)
+            else: risks.append(feature)
         else:
-            risks.append(feature)
+            # Fallback for old string format during transition
+            part = result.split(":")
+            if len(part) < 2: continue
+            if "strengthens" in str(result) or "consistent" in str(result): strengths.append(part[0].strip())
+            else: risks.append(part[0].strip())
 
-    message = ""
     if risk_level == "High":
-        message = "URGENT ACTION REQUIRED: Schedule a meeting with your academic counselor immediately. "
-        if risks:
-            message += f"Critical areas needing attention: {', '.join(risks)}. "
-        message += "We recommend a supervised study plan and immediate intervention in these areas."
+        summary = "CRITICAL INTERVENTION NEEDED: The student is showing significant signs of academic detachment."
+        teacher = f"URGENT: Focus on recovering {', '.join(risks[:2])}. Consider an alternate assignment format to re-engage the student."
+        counselor = "HIGH PRIORITY: Conduct a one-on-one session. Explore external stress factors and provide immediate mental health support."
     
     elif risk_level == "Medium":
-        message = "MODERATE RISK IDENTIFIED: We recommend joining a peer mentoring group. "
-        if risks:
-            message += f"Focus on stabilizing your {', '.join(risks)}. "
-        if strengths:
-            message += f"Your strength in {strengths[0]} is a good foundation to build upon. "
-        message += "Check the LMS for tailored resources and practice exercises."
+        summary = "PREVENTATIVE CARE RECOMMENDED: Stable but showing early warning signs in specific areas."
+        teacher = f"Provide additional resources for {', '.join(risks[:2])}. Peer-mentoring in these subjects could be highly effective."
+        counselor = "Early intervention advised. Student might be feeling overwhelmed. Recommend a time-management workshop."
     
     else: # Low Risk
-        message = "LOW RISK: Excellent overall performance! "
-        if strengths:
-            message += f"Your consistency in {', '.join(strengths)} is keeping you on track. "
-        if risks:
-            message += f"NOTE: Even though you are low risk, please monitor your {', '.join(risks)} as they are slight negative indicators. "
-        message += "Keep up the great work!"
-        
-    return message
+        summary = "EXCELLENT STANDING: Student is performing at a high level with strong engagement."
+        teacher = f"Encourage leadership roles. Their strength in {', '.join(strengths[:2])} can be used to help peers."
+        counselor = "Continue periodic encouragement. They are a role model for consistency."
+
+    return {
+        "summary": summary,
+        "teacher": teacher,
+        "counselor": counselor,
+        "checklist": [f"Improve {r}" for r in risks] + [f"Maintain {s}" for s in strengths]
+    }
 
 # We need to simulate the exact preprocessing steps from train_models.py
 def preprocess_input(input_dict):
@@ -260,24 +265,39 @@ def predict():
                     row_shap = shap_output[0]
                 
                 # ... same logic as before for labels ...
-                top_indices = np.argsort(np.abs(row_shap))[-3:][::-1]
+                # --- Refined Factor Analysis ---
+                top_indices = np.argsort(np.abs(row_shap))[-4:][::-1]
                 for idx in top_indices:
                     feature_name = list(X_processed.columns)[idx].replace('_', ' ').title()
-                    explanations.append(f"{feature_name}: increases risk significantly" if risk_level != "Low" else f"{feature_name}: strengthens academic stability")
+                    val = row_shap[idx]
+                    
+                    # Logic for "Good/Bad" categorization
+                    is_good = (val < 0) # Negative SHAP value reduces dropout risk
+                    
+                    status = "Good" if is_good else "Danger"
+                    if abs(val) < 0.05: status = "Warning" # Subtle impact
+                    
+                    # Vocabulary Upgrade
+                    if is_good:
+                        label = random.choice(["Top Performance Lever", "Strong Foundation", "Academic Asset", "Strength Field"])
+                        advice = f"Your {feature_name} is currently a huge win. Keep it up!"
+                    else:
+                        label = random.choice(["Urgent Priority", "Danger Zone", "Growth Opportunity", "Critical Barrier"])
+                        advice = f"Your {feature_name} is pulling your performance down. Let's fix this."
+
+                    explanations.append({
+                        "feature": feature_name,
+                        "status": status,
+                        "label": label,
+                        "advice": advice
+                    })
             except Exception as e:
                 print(f"SHAP Runtime Error: {e}")
-                explainer = None # Fallback to Feature Importance below
+                explainer = None
         
-        # Fallback to Feature Importance if SHAP is unavailable
         if not explanations:
-            try:
-                importances = model.get_feature_importance()
-                top_indices = np.argsort(importances)[-3:][::-1]
-                for idx in top_indices:
-                    feature_name = list(X_processed.columns)[idx].replace('_', ' ').title()
-                    explanations.append(f"{feature_name}: key contributing factor")
-            except:
-                explanations.append("Risk analysis factors currently unavailable.")
+            # Simple fallback
+            explanations = [{"feature": "General Engagement", "status": "Good", "label": "Stable Data", "advice": "Data profile appears consistent."}]
         
         # 3d.2 LIME Explanation
         lime_rationale = ""
@@ -298,10 +318,13 @@ def predict():
         recommendations = get_recommendations(risk_level, explanations)
 
         # 3f. Logging to SQLite
-        shap_str = " | ".join(explanations)
+        # Convert structured explanations to strings for database storage
+        shap_logs = [f"{e['feature']} ({e['status']})" for e in explanations]
+        shap_str = " | ".join(shap_logs)
+        
         log_prediction(input_data, prediction_score, risk_level, 
                       xai_shap=shap_str, xai_lime=lime_rationale,
-                      recommendations=recommendations)
+                      recommendations=str(recommendations))
         
         # 3g. Return Response
         return jsonify({
@@ -328,11 +351,14 @@ def chat():
     try:
         data = request.get_json()
         user_query = data.get('query', '')
+        risk_level = data.get('risk_level', 'Low')
+        username = data.get('username', 'Student')
+        
         if not user_query:
             return jsonify({"error": "No query provided."}), 400
         
-        # Get AI response
-        bot_response = get_chatbot_response(user_query)
+        # Get AI response with context
+        bot_response = get_chatbot_response(user_query, risk_level=risk_level, username=username)
         
         return jsonify({
             "status": "success",
@@ -342,6 +368,66 @@ def chat():
     except Exception as e:
         print(f"Chat Error: {e}")
         return jsonify({"error": "Failed to generate chat response."}), 500
+
+# --- 4. Authentication Endpoints ---
+
+@app.route('/api/register', methods=['POST'])
+def register():
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        email = data.get('email')
+        password = data.get('password')
+        
+        if not username or not password:
+            return jsonify({"error": "Username and password are required."}), 400
+            
+        success, message = add_user(username, password, email=email)
+        if success:
+            return jsonify({"status": "success", "message": message}), 201
+        else:
+            return jsonify({"error": message}), 400
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        password = data.get('password')
+        
+        if not username or not password:
+            return jsonify({"error": "Username and password are required."}), 400
+            
+        success, message = verify_user(username, password)
+        if success:
+            return jsonify({"status": "success", "message": message, "username": username}), 200
+        else:
+            return jsonify({"error": message}), 401
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+            
+@app.route('/api/data', methods=['GET'])
+def get_prediction_data():
+    """Endpoint for the dashboard to fetch all historical records."""
+    try:
+        conn = get_db_connection()
+        # Fetching column names to convert to dictionary
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM predictions ORDER BY timestamp DESC")
+        rows = cursor.fetchall()
+        
+        # Convert to list of dicts
+        data = [dict(row) for row in rows]
+        conn.close()
+        
+        return jsonify({"status": "success", "data": data}), 200
+    except Exception as e:
+        print(f"Data Fetch Error: {e}")
+        return jsonify({"error": "Failed to fetch student records"}), 500
 
 @app.route('/', methods=['GET'])
 def health_check():

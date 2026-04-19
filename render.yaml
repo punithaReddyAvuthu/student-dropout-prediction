@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: student-dropout-api
+    env: python
+    buildCommand: pip install -r api/requirements.txt
+    startCommand: gunicorn --chdir api app:app
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.0
