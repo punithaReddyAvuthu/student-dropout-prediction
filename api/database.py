@@ -12,7 +12,7 @@ DB_FILE = os.path.join(db_folder, 'predictions.db')
 
 def get_db_connection():
     """Establish a connection to the SQLite database."""
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_FILE, timeout=15.0)
     conn.row_factory = sqlite3.Row
     return conn
 
