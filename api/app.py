@@ -240,13 +240,17 @@ def predict():
         # --- 3b. Make Prediction ---
         # risk_map (alphabetical): High=0, Low=1, Medium=2
         risk_map = {0: "High", 1: "Low", 2: "Medium"}
-        prediction = model.predict(X_processed)
-        pred_class = int(prediction[0])
+        prediction = np.array(model.predict(X_processed)).ravel()
+        pred_class = int(prediction[0].item() if hasattr(prediction[0], 'item') else prediction[0])
         risk_level = risk_map.get(pred_class, "Unknown")
         
         # 3c. Get Prediction Score (Probability)
-        probabilities = model.predict_proba(X_processed)[0]
-        prediction_score = float(probabilities[pred_class])
+        probabilities = np.array(model.predict_proba(X_processed))
+        if probabilities.ndim > 1:
+            probs_row = probabilities[0]
+        else:
+            probs_row = probabilities
+        prediction_score = float(probs_row[pred_class].item() if hasattr(probs_row[pred_class], 'item') else probs_row[pred_class])
         
         # --- 3d. Generate XAI Explanations ---
         explanations = []
